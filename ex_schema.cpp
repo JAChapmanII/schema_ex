@@ -1,14 +1,14 @@
 [[translatable]] struct DamageClass { };
 
 [[translatable]] struct Stat {
-	DamageClass::id_t damageClassId;
+	DamageClass::id_t damageClass;
 
 	bool isBattleOnly;
 	int gameIndex;
 };
 
 [[translatable]] struct Type {
-	DamageClass::id_t damageClassId;
+	DamageClass::id_t damageClass;
 
 	map<Type::id_t, int> damageFactors;
 };
