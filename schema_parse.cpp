@@ -58,12 +58,15 @@ string createTableHeader(string name) {
 string createTableFooter() {
 	return ");";
 }
+string primaryKeyConstraint(vector<string> tables) {
+	string res = tableCase(tables.front()) + "_id";
+	for(int i = 1; i < tables.size(); ++i)
+		res += ", " + tableCase(tables[i]) + "_id";
+	return "PRIMARY KEY(" + res + ")";
+}
 template<typename... Args> string primaryKeyConstraint(Args... args) {
 	vector<string> vals = {args...};
-	string res = tableCase(vals.front()) + "_id";
-	for(int i = 1; i < vals.size(); ++i)
-		res += ", " + tableCase(vals[i]) + "_id";
-	return "PRIMARY KEY(" + res + ")";
+	return primaryKeyConstraint(vals);
 }
 string formatTable(string header, vector<string> fields,
 		vector<string> constraints, string footer) {
@@ -83,6 +86,9 @@ string formatTable(string header, vector<string> fields,
 
 bool isIdType(string type) {
 	return type.size() >= 6 && type.substr(type.size() - 6) == "::id_t";
+}
+string getBaseIdType(string type) {
+	return type.substr(0, type.size() - 6);
 }
 
 
@@ -143,10 +149,7 @@ struct Context {
 
 		buildTypeDepths();
 
-		// compute maxDepth
-		int maxDepth = 0;
-		for(auto &tde : typeDepth)
-			maxDepth = max(maxDepth, tde.second);
+		auto orderedNonIdTypes = getOrderedNonIdTypes();
 
 		// print pure child types
 		for(auto &te : types) {
@@ -156,214 +159,191 @@ struct Context {
 		}
 
 		// in depth order, print create tables for struct types
-		for(int i = 0; i <= maxDepth; ++i) {
-			for(auto &tde : typeDepth) {
-				if(tde.second != i)
-					continue;
-				if(isIdType(tde.first))
-					continue;
-				if(!types[tde.first].composite)
-					continue;
-				if(types[tde.first].pureChild)
-					continue;
-				cerr << tde.second << " => " << tde.first << endl;
-				vector<string> tableFields{};
-				vector<string> tableConstraints{};
-				if(parentTypes.find(tde.first) == parentTypes.end()) {
-					tableFields.push_back("`" + tableCase(tde.first) + "_id`"
-							+ " UNIQUEIDENTIFIER PRIMARY KEY");
-				} else {
-					vector<string> keyNames{};
-					vector<string> ptNames{};
-					string t = tde.first;
-					bool doAdvance = false;
-					do {
-						if(doAdvance)
-							t = parentTypes[t];
-						else
-							doAdvance = true;
+		for(auto &typeName : orderedNonIdTypes) {
+			auto &type = types[typeName];
+			if(!type.composite || type.pureChild)
+				continue;
 
-						ptNames.push_back(pluralize(tableCase(t)));
-						keyNames.push_back(tableCase(t) + "_id");
-						tableFields.push_back("`" + keyNames.back() + "`"
-								+ " UNIQUEIDENTIFIER NOT NULL");
-					} while(parentTypes.find(t) != parentTypes.end());
-					for(int i = 1; i < ptNames.size(); ++i)
-						tableConstraints.push_back("FOREIGN KEY(" + keyNames[i] + ")"
-								+ " REFERENCES " + ptNames[i] + "(" + keyNames[i] + ")");
-					string pkField = "PRIMARY KEY(" + keyNames[0];
-					for(int i = 1; i < keyNames.size(); ++i)
-						pkField += ", " + keyNames[i];
-					pkField += ")";
-					tableConstraints.push_back(pkField);
-				}
-				auto &type = types[tde.first];
-				for(int i = 0; i < type.fields.size(); ++i) {
-					auto &field = type.fields[i];
-					auto &ft = types[field.type];
-					if(ft.composite)
-						continue;
-					if(field.type == tde.first + "::id_t")
-						continue;
-					if(field.type.size() >= 6 // TODO: helper method this
-							&& field.type.substr(field.type.size() - 6) == "::id_t") {
-						string otype = field.type.substr(0, field.type.size() - 6);
-						tableFields.push_back("`" + tableCase(field.name) + "_id`"
-								+ " UNIQUEIDENTIFIER NOT NULL");
-						tableConstraints.push_back(
-								"FOREIGN KEY(" + tableCase(field.name) + "_id)"
-								+ " REFERENCES " + pluralize(tableCase(otype))
-								+ "(" + tableCase(otype) + "_id)");
-						continue;
-					}
-					if(field.type == "int" || field.type == "bool") {
-						tableFields.push_back("`" + tableCase(field.name) + "`" + " INT NOT NULL");
-						continue;
-					}
-					if(field.type == "string") {
-						tableFields.push_back("`" + tableCase(field.name) + "`" + " TEXT NOT NULL");
-						continue;
-					}
-					if(ft.name == "map") continue;
-					if(ft.name == "set") continue;
-					if(ft.name == "vector") continue;
-					throw "unable to do simple field type " + field.type;
-				}
-				cout << formatTable(createTableHeader(tde.first),
-						tableFields, tableConstraints, createTableFooter()) << endl;
+			vector<string> tableFields{};
+			vector<string> tableConstraints{};
+
+			// handle id/parent ids
+			if(parentTypes.find(typeName) == parentTypes.end()) {
+				// we're a root type, include our id primary key
+				tableFields.push_back("`" + tableCase(typeName) + "_id`"
+						+ " UNIQUEIDENTIFIER PRIMARY KEY");
+			} else {
+				// we're a child type, need to build id refs
+				string t = typeName;
+				vector<string> pkFields;
+				pkFields.push_back(t);
+
+				tableFields.push_back(foreignKeyField(t));
+				do {
+					t = parentTypes[t];
+					pkFields.push_back(t);
+
+					tableFields.push_back(foreignKeyField(t));
+					tableConstraints.push_back(foreignKeyConstraint(t));
+				} while(parentTypes.find(t) != parentTypes.end());
+
+				tableConstraints.push_back(primaryKeyConstraint(pkFields));
 			}
+
+			for(int i = 0; i < type.fields.size(); ++i) {
+				auto &field = type.fields[i];
+				auto &ft = types[field.type];
+				if(ft.composite)
+					continue;
+				if(field.type == typeName + "::id_t")
+					continue; // skip our own id since it is generated above
+
+				if(ft.name == "map" || ft.name == "set" || ft.name == "vector")
+					continue; // special subtable types are handled later
+
+				// if we have the id_t of another table, add foreign key
+				if(isIdType(field.type)) {
+					string otype = getBaseIdType(field.type);
+					tableFields.push_back("`" + tableCase(field.name) + "_id`"
+							+ " UNIQUEIDENTIFIER NOT NULL");
+					tableConstraints.push_back("FOREIGN KEY("
+							+ tableCase(field.name) + "_id) REFERENCES "
+							+ pluralize(tableCase(otype)) + "("
+							+ tableCase(otype) + "_id)");
+					continue;
+				}
+
+				tableFields.push_back(typedField(
+							field.type, tableCase(field.name)));
+			}
+
+			cout << formatTable(createTableHeader(typeName),
+					tableFields, tableConstraints, createTableFooter()) << endl;
 		}
 
 		// in depth order, print child relations that aren't pure
-		for(int i = 0; i <= maxDepth; ++i) {
-			for(auto &tde : typeDepth) {
-				if(tde.second != i)
-					continue;
-				if(isIdType(tde.first))
-					continue;
-				if(!types[tde.first].composite)
-					continue;
-				if(types[tde.first].pureChild)
-					continue;
+		for(auto &typeName : orderedNonIdTypes) {
+			auto &type = types[typeName];
+			if(!type.composite || type.pureChild)
+				continue;
 
-				auto &type = types[tde.first];
-				for(auto &field : type.fields) {
-					auto &ft = types[field.type];
-					if(ft.name == "set") {
-						//string subType = ft.typeArguments[0];
-						//cerr << "-- field " << field.name << " is table" << endl;
-						continue;
-					}
-					if(ft.name == "map") {
-						string keyType = ft.typeArguments[0], valType = ft.typeArguments[1];
-						auto &kt = types[keyType];
-						auto &vt = types[valType];
-						if(vt.composite) {
-							// TODO: this is child table but not being done correctly?
-							cerr << "-- TODO: field "
-								<< tde.first << "::" << field.name
-								<< " is table" << endl;
-							continue;
-						}
-						cerr << "-- TODO: " << tde.first << "::" << field.name << endl;
-						string keyTypeType = keyType.substr(0, keyType.size() - 6);
-						cout << formatTable(
-								createTableHeader(tde.first + "_" + field.name),
-								{
-									foreignKeyField(tde.first),
-									foreignKeyField(keyTypeType, field.name),
-									typedField(valType, "val")
-								},
-								{
-									foreignKeyConstraint(tde.first),
-									foreignKeyConstraint(keyTypeType, field.name),
-									primaryKeyConstraint(tde.first, field.name + "_" + keyTypeType)
-								}, createTableFooter()
-							) << endl;
-					}
-					if(ft.name == "vector") {
-						string subType = ft.typeArguments[0];
-						string tn1 = tableCase(tde.first), tn2 = tableCase(subType);
-						cerr << "-- look for me =========================" << endl;
+			for(auto &field : type.fields) {
+				auto &ft = types[field.type];
+				if(ft.name == "set")
+					continue; // sets are actual tables generated above
+				if(ft.name != "map" && ft.name != "vector")
+					continue; // impure child relations are only map and vector
 
-						cout << formatTable(
-								createTableHeader(tde.first + "_" + field.name),
-								{
-									foreignKeyField(tde.first),
-									foreignKeyField(subType)
-								},
-								{
-									foreignKeyConstraint(tde.first),
-									foreignKeyConstraint(subType),
-									primaryKeyConstraint(tde.first, subType)
-								}, createTableFooter()
-							) << endl;
-					}
-				}
-			}
-		}
-
-		for(int i = 0; i <= maxDepth; ++i) {
-			for(auto &tde : typeDepth) {
-				if(tde.second != i)
-					continue;
-				if(isIdType(tde.first))
-					continue;
-				if(!types[tde.first].composite)
-					continue;
-				if(!types[tde.first].pureChild)
-					continue;
-
-				auto &type = types[tde.first];
-				string parentType = parentTypes[tde.first];
-				cerr << "-- pure child " << tde.first << " of " << parentType << endl;
-
-				string parentFieldName = pureChildFieldNames[tde.first];
-				Field parentField{"{null}", parentFieldName};
-				for(auto &field : types[parentType].fields)
-					if(field.name == parentFieldName)
-						parentField.type = field.type;
-
-				string parentFieldKeyType = types[parentField.type].typeArguments[0];
-				if(!isIdType(parentFieldKeyType))
-					throw parentFieldKeyType + " is not id type";
-
-				cerr << "-- " << parentField.name << " ! " << parentField.type
-					<< " ! " << parentFieldKeyType << endl;
-
+				string pkSecond;
 				vector<string> fields, constraints;
+				fields.push_back(foreignKeyField(typeName));
+				constraints.push_back(foreignKeyConstraint(typeName));
 
-				fields.push_back(foreignKeyField(parentType));
-				constraints.push_back(foreignKeyConstraint(parentType));
-
-				string parentFieldKeyTypeType = parentFieldKeyType.substr(
-						0, parentFieldKeyType.size() - 6);
-				fields.push_back(foreignKeyField(parentFieldKeyTypeType));
-				constraints.push_back(foreignKeyConstraint(parentFieldKeyTypeType));
-
-				constraints.push_back(primaryKeyConstraint(
-							parentType, parentFieldKeyTypeType));
-
-				for(auto &field : type.fields) {
-					auto &ft = types[field.type];
-					// should only have built in fields and ::id_t
-
-					if(isIdType(ft.name)) {
-						string ftType = ft.name.substr(0, ft.name.size() - 6);
-						if(ftType == tde.first)
-							continue; // don't print key type for self
-						fields.push_back(foreignKeyField(ftType));
-						constraints.push_back(foreignKeyConstraint(ftType));
+				if(ft.name == "map") {
+					string keyType = ft.typeArguments[0], valType = ft.typeArguments[1];
+					auto &kt = types[keyType];
+					auto &vt = types[valType];
+					if(vt.composite) {
+						// this is actually a pure child, will be handled later
 						continue;
 					}
-					fields.push_back(typedField(ft.name, field.name));
+
+					string keyTypeType = keyType.substr(0, keyType.size() - 6);
+
+					fields.push_back(foreignKeyField(keyTypeType, field.name));
+					fields.push_back(typedField(valType, "val"));
+
+					constraints.push_back(foreignKeyConstraint(
+								keyTypeType, field.name));
+					pkSecond = field.name + "_" + keyTypeType;
+				}
+				if(ft.name == "vector") {
+					string subType = ft.typeArguments[0];
+
+					fields.push_back(foreignKeyField(subType));
+					constraints.push_back(foreignKeyConstraint(subType));
+					pkSecond = subType;
 				}
 
-				cout << formatTable(
-						createTableHeader(tde.first),
+				constraints.push_back(primaryKeyConstraint(typeName, pkSecond));
+
+				cerr << "-- impure child relation" << endl;
+				cout << formatTable(createTableHeader(typeName + "_" + field.name),
 						fields, constraints, createTableFooter()) << endl;
 			}
 		}
+
+		// generate all pure child relation tables
+		for(auto &typeName : orderedNonIdTypes) {
+			auto &type = types[typeName];
+			if(!type.composite || !type.pureChild)
+				continue;
+
+			string parentType = parentTypes[typeName];
+			cerr << "-- pure child " << typeName << " of " << parentType << endl;
+
+			string parentFieldName = pureChildFieldNames[typeName];
+			Field parentField{"{null}", parentFieldName};
+			for(auto &field : types[parentType].fields)
+				if(field.name == parentFieldName)
+					parentField.type = field.type;
+
+			string parentFieldKeyType = types[parentField.type].typeArguments[0];
+			if(!isIdType(parentFieldKeyType))
+				throw parentFieldKeyType + " is not id type";
+
+			cerr << "-- " << parentField.name << " ! " << parentField.type
+				<< " ! " << parentFieldKeyType << endl;
+
+			vector<string> fields, constraints;
+
+			fields.push_back(foreignKeyField(parentType));
+			constraints.push_back(foreignKeyConstraint(parentType));
+
+			string parentFieldKeyTypeType = getBaseIdType(parentFieldKeyType);
+			fields.push_back(foreignKeyField(parentFieldKeyTypeType));
+			constraints.push_back(foreignKeyConstraint(parentFieldKeyTypeType));
+
+			constraints.push_back(primaryKeyConstraint(
+						parentType, parentFieldKeyTypeType));
+
+			for(auto &field : type.fields) {
+				auto &ft = types[field.type];
+				// should only have built in fields and ::id_t
+
+				if(isIdType(ft.name)) {
+					string ftType = getBaseIdType(ft.name);
+					if(ftType == typeName)
+						continue; // don't print key type for self
+					fields.push_back(foreignKeyField(ftType));
+					constraints.push_back(foreignKeyConstraint(ftType));
+					continue;
+				}
+				fields.push_back(typedField(ft.name, field.name));
+			}
+
+			cout << formatTable(createTableHeader(typeName),
+					fields, constraints, createTableFooter()) << endl;
+		}
+	}
+
+	vector<string> getOrderedNonIdTypes() {
+		size_t cnt = 0;
+		map<int, vector<string>> levels{};
+		for(auto &tde : typeDepth) {
+			if(isIdType(tde.first))
+				continue;
+			levels[tde.second].push_back(tde.first);
+			cnt++;
+		}
+
+		vector<string> ordered{};
+		ordered.reserve(cnt);
+
+		for(auto &level : levels)
+			ordered.insert(ordered.end(), level.second.begin(), level.second.end());
+
+		return ordered;
 	}
 
 	int getTypeDepth(string t) {
