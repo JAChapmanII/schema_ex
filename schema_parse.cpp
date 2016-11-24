@@ -122,6 +122,7 @@ struct Context {
 	map<string, set<string>> weakDeps{};
 	map<string, int> weakDepOrder{};
 	map<string, string> pureChildFieldNames{};
+	bool usedTranslatable{false};
 
 	Context(string isrc) : src{isrc} {
 		types.emplace("int", Type{"int", false});
@@ -523,8 +524,10 @@ struct Context {
 		declType(typeName + "::id_t");
 		types[typeName].fields.push_back(Field{typeName + "::id_t", "id"});
 
-		if(translatable)
+		if(translatable) {
+			usedTranslatable = true;
 			makeTranslatable(typeName);
+		}
 	}
 
 	void parseType() {
@@ -563,12 +566,13 @@ struct Context {
 	}
 
 	void parse() {
-		declStructType("Language", true);
-
 		while(idx < src.size()) {
 			skipSpaces();
 			parseType();
 		}
+
+		if(usedTranslatable)
+			declStructType("Language", true);
 	}
 };
 
