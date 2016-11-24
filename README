@@ -1,0 +1,175 @@
+schema_ex is a utilty to generate SQL schema/code from a c++ schema definition.
+
+There are several examples included in the ex_*.cpp files. Basic usage is
+definitions of several structs. Most structs map to a table (we
+lower/snake_case all identifiers when generating the output.
+
+Built-in types exist for `string`, `int`, and `bool`.
+	struct User {
+		string name;
+		string hash;
+		int lastLogin;
+	};
+
+(ex_user.cpp) generates:
+	CREATE TABLE `users` (
+		`user_id` UNIQUEIDENTIFIER PRIMARY KEY,
+		`name` TEXT NOT NULL,
+		`hash` TEXT NOT NULL,
+		`last_login` INT NOT NULL
+	);
+
+
+Each type defined automatically has a `::id_t` associated with it. We can
+extend the previous example by adding a few new types.
+	struct Application { };
+	struct AppUser {
+		User::id_t user;
+		Application::id_t application;
+		int level;
+	};
+
+(ex_user2.cpp) generates: // TODO: fix ordering, ::id_t references is ordering
+	CREATE TABLE `applications` (
+		`application_id` UNIQUEIDENTIFIER PRIMARY KEY
+	);
+	CREATE TABLE `app_users` (
+		`app_user_id` UNIQUEIDENTIFIER PRIMARY KEY,
+		`user_id` UNIQUEIDENTIFIER NOT NULL,
+		`application_id` UNIQUEIDENTIFIER NOT NULL,
+		`level` INT NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(user_id),
+		FOREIGN KEY(application_id) REFERENCES applications(application_id)
+	);
+
+
+`map`, `set`, and `vector` have special meanings and end up generating
+sub-tables instead of columns.
+
+`vector` represents a 1-to-many relationship that is a binary relationship on
+the parent and child types. Adding a simple `Tag` type and a `vector<Tag>
+tags` field to our `User` type generates (ex_user3.cpp):
+	CREATE TABLE `tags` (
+		`tag_id` UNIQUEIDENTIFIER PRIMARY KEY
+	);
+	CREATE TABLE `user_tags` (
+		`user_id` UNIQUEIDENTIFIER NOT NULL,
+		`tag_id` UNIQUEIDENTIFIER NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(user_id),
+		FOREIGN KEY(tag_id) REFERENCES tags(tag_id),
+		PRIMARY KEY(user_id, attribute_id)
+	);
+
+`set` represents a 1-to-many relationship where the type argument is a child
+of the containing type. As a contrived example we can add a `Department` type
+where each `User` is an employee that belongs to exactly one department.
+	struct Department {
+		set<User> employees;
+	}
+
+This generates (ex_user4.cpp):
+	CREATE TABLE `departments` (
+		`department_id` UNIQUEIDENTIFIER PRIMARY KEY
+	);
+	CREATE TABLE `users` (
+		`user_id` UNIQUEIDENTIFIER NOT NULL,
+		`department_id` UNIQUEIDENTIFIER NOT NULL,
+		`name` TEXT NOT NULL,
+		`hash` TEXT NOT NULL,
+		`last_login` INT NOT NULL,
+		FOREIGN KEY(department_id) REFERENCES departments(department_id),
+		PRIMARY KEY(user_id, department_id)
+	);
+
+`map` behaves slightly differently depending on if the value type is a
+user-defined struct or a built-in type. If it is a built-in type it's
+equivalent to the `vector` example with an added column for storing extra
+data. If we expand the initial `User` example with user defined attributes
+(for example ("height", "5ft 8in"), ("eye color", "red")):
+	struct Attribute { string name; }
+	// new field in User: map<Attribute::id_t, string> attributes;
+
+this generates (ex_user5.cpp):
+	CREATE TABLE `attributes` (
+		`attribute_id` UNIQUEIDENTIFIER PRIMARY KEY,
+		`name` TEXT NOT NULL
+	);
+	CREATE TABLE `user_attributes` (
+		`user_id` UNIQUEIDENTIFIER NOT NULL,
+		`attributes_attribute_id` UNIQUEIDENTIFIER NOT NULL,
+		`val` TEXT NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(user_id),
+		FOREIGN KEY(attributes_attribute_id) REFERENCES attributes(attribute_id),
+		PRIMARY KEY(user_id, attributes_attribute_id)
+	);
+
+If instead the value type is a user-defined struct we generate similar schema
+but instead of a simple `val` column we create a column per field in the value
+type. Adjusting the previous example to track the last modified time per user
+per attribute:
+	struct UserAttribute {
+		string value;
+		int lastModified;
+	};
+	// User field: map<Attribute::id_t, UserAttribute> attributes;
+
+generates (ex_user6.cpp):
+	CREATE TABLE `user_attributes` (
+		`user_id` UNIQUEIDENTIFIER NOT NULL,
+		`attribute_id` UNIQUEIDENTIFIER NOT NULL,
+		`value` TEXT NOT NULL,
+		`lastModified` INT NOT NULL,
+		FOREIGN KEY(user_id) REFERENCES users(user_id),
+		FOREIGN KEY(attribute_id) REFERENCES attributes(attribute_id),
+		PRIMARY KEY(user_id, attribute_id)
+	);
+
+
+Finally there are attributes (c++ generalized attributes). The currently
+supported attributes are only `translatable`. This is a shortcut for adding a
+`string identifier` field with a `map<Language::id_t, string> translations`
+mapping. If any structs defined in the schema have this attribute, we also
+generate a simple `Language` type:
+	[[translatable]] struct Language { };
+
+This is useful for things that need a programmatic name but which should be
+localized when showing to the user. A dead simple example are stats in many
+games which might include "Attack", "Special Attack", etc. The `identifier`
+values would be "attack" and "special-attack" and the user friendly names
+would be in the translations table under the English language.
+	[[translatable]] struct Stat { };
+
+generates (ex_stat.cpp):
+	CREATE TABLE `languages` (
+		`language_id` UNIQUEIDENTIFIER PRIMARY KEY,
+		`identifier` TEXT NOT NULL
+	);
+	CREATE TABLE `stats` (
+		`stat_id` UNIQUEIDENTIFIER PRIMARY KEY,
+		`identifier` TEXT NOT NULL
+	);
+	CREATE TABLE `language_translations` (
+		`language_id` UNIQUEIDENTIFIER NOT NULL,
+		`translations_language_id` UNIQUEIDENTIFIER NOT NULL,
+		`val` TEXT NOT NULL,
+		FOREIGN KEY(language_id) REFERENCES languages(language_id),
+		FOREIGN KEY(translations_language_id) REFERENCES languages(language_id),
+		PRIMARY KEY(language_id, translations_language_id)
+	);
+	CREATE TABLE `stat_translations` (
+		`stat_id` UNIQUEIDENTIFIER NOT NULL,
+		`translations_language_id` UNIQUEIDENTIFIER NOT NULL,
+		`val` TEXT NOT NULL,
+		FOREIGN KEY(stat_id) REFERENCES stats(stat_id),
+		FOREIGN KEY(translations_language_id) REFERENCES languages(language_id),
+		PRIMARY KEY(stat_id, translations_language_id)
+	);
+
+Languages themselves are always translatable where the identifier might be
+"en_US", "es_ES" with entries in `language_translations` looking like:
+	("en_US", "en_US", "English"),
+	("en_US", "es_ES", "Inglés"),
+	("en_ES", "en_US", "Spanish"),
+	("en_ES", "en_ES", "Español")
+
+
