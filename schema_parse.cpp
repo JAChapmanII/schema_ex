@@ -771,6 +771,9 @@ py::Context Context::genPythonContext() {
 
 		auto &pclass = ctx[type.name];
 		auto &ctor = pclass["__init__"];
+		Type *parentType{nullptr};
+		Field *parentField{nullptr};
+		Type *parentFieldType{nullptr};
 
 		if(!parents.empty()) {
 			for(auto &parent : parents) {
@@ -779,26 +782,31 @@ py::Context Context::genPythonContext() {
 					"self." + toCamelCase(parent) + "ID"
 					+ " = " + toCamelCase(parent) + "ID";
 			}
+			parentType = &types[parents.back()];
 		}
 		if(type.pureChild) {
 			ctor += "# pure child";
 			auto pcfname = pureChildFieldNames[type.name];
-			for(auto &parentField : types[parentTypes[type.name]].fields) {
-				if(parentField.name != pcfname)
+			for(auto &pf : types[parentTypes[type.name]].fields) {
+				if(pf.name != pcfname)
 					continue;
-
-				auto &pfType = types[parentField.type];
-				auto ktype = getBaseIdType(pfType.typeArguments[0]);
-
-				ctor.arguments.emplace_back(toCamelCase(ktype) + "ID");
-				ctor += "self." + toCamelCase(ktype) + "ID = "
-					+ toCamelCase(ktype) + "ID";
+				parentField = &pf;
+				parentFieldType = &types[parentField->type];
 			}
+
+			auto ktype = getBaseIdType(parentFieldType->typeArguments[0]);
+
+			ctor.arguments.emplace_back(toCamelCase(ktype) + "ID");
+			ctor += "self." + toCamelCase(ktype) + "ID = "
+				+ toCamelCase(ktype) + "ID";
 		} else {
 			ctor +=
-				"self." + toCamelCase(type.name) + "ID = util.randomString(6)";
+				"self." + toCamelCase(type.name) + "ID = util.randomString(6)"
+					+ " if " + toCamelCase(type.name) + "ID is None else "
+					+ toCamelCase(type.name) + "ID";
 		}
 
+		auto &loadAll = pclass["loadAll"];
 		for(auto &field : type.fields) {
 			if(field.name == "id") continue; // skip self id
 			auto &ftype = types[field.type];
@@ -806,6 +814,7 @@ py::Context Context::genPythonContext() {
 				auto &stype = types[ftype.typeArguments[1]];
 				auto btype = getBaseIdType(ftype.typeArguments[0]);
 				auto &loadMember = pclass[toCamelCase("load_" + field.name)];
+				loadAll += "self." + loadMember.name + "()";
 				if(!stype.composite) {
 					loadMember += "tmp = schema."
 						+ toCamelCase("_" + type.name + "_" + field.name)
@@ -829,6 +838,7 @@ py::Context Context::genPythonContext() {
 			if(ftype.name == "vector") {
 				auto btype = ftype.typeArguments[0];
 				auto &loadMember = pclass[toCamelCase("load_" + field.name)];
+				loadAll += "self." + loadMember.name + "()";
 				loadMember += "tmp = schema."
 					+ toCamelCase("_" + type.name + "_" + field.name)
 					+ ".select({"
@@ -843,6 +853,7 @@ py::Context Context::genPythonContext() {
 			}
 			if(ftype.name == "set") {
 				auto &loadMember = pclass[toCamelCase("load_" + field.name)];
+				loadAll += "self." + loadMember.name + "()";
 				loadMember +=
 						"self." + field.name + " = " + ftype.typeArguments[0]
 						+ ".findAll("
@@ -863,21 +874,56 @@ py::Context Context::genPythonContext() {
 			ctor += "self." + field.name + " = " + field.name + " # " + field.type;
 		}
 
-		if(!parents.empty()) {
-			auto &findAll = pclass["findAll"];
-			findAll.type = py::FunctionType::Class;
-			for(auto &parent : parents) {
-				string ident = toCamelCase(parent) + "ID";
-				findAll.arguments.push_back({ident, "None", true});
-			}
+		if(!type.pureChild)
+			ctor.arguments.push_back({toCamelCase(type.name) + "ID", "None", true});
 
-			findAll.body.push_back(
-				"return cls.select("
-				+ util::join(parents, ", ", [](auto p) {
-						return "'" + tableCase(p) + "_id': " + toCamelCase(p) + "ID";
-					})
-				+ ")");
+		auto &findAll = pclass["findAll"];
+		findAll.type = py::FunctionType::Class;
+		findAll.arguments.reserve(parents.size());
+		for(auto &parent : parents) {
+			string ident = toCamelCase(parent) + "ID";
+			findAll.arguments.push_back({ident, "None", true});
 		}
+
+		findAll.body.push_back(
+			"return [cls.fromLite(o) for o in schema."
+			+ type.name + ".select({"
+			+ util::join(parents, ", ", [](auto p) {
+					return "'" + tableCase(p) + "_id': " + toCamelCase(p) + "ID";
+				})
+			+ "})");
+
+		auto &fromLite = pclass["fromLite"];
+		fromLite.type = py::FunctionType::Class;
+		fromLite.arguments.push_back({"flite"});
+		vector<string> fliteArgs{};
+		for(auto &parent : parents)
+			fliteArgs.push_back(tableCase(parent) + "_id");
+		if(type.pureChild) {
+			auto ktype = getBaseIdType(parentFieldType->typeArguments[0]);
+			fliteArgs.push_back(tableCase(ktype) + "_id");
+		}
+		for(auto &field : type.fields) {
+			if(field.name == "id") continue; // skip self id
+			auto &ftype = types[field.type];
+			if(ftype.name == "vector"
+					|| ftype.name == "set"
+					|| ftype.name == "map") {
+				continue; // these can be loaded manually
+			}
+			if(isIdType(field.name)) {
+				fliteArgs.push_back("None TODO");
+			} else {
+				fliteArgs.push_back(tableCase(field.name));
+			}
+		}
+		if(!type.pureChild) {
+			fliteArgs.push_back(tableCase(type.name) + "_id");
+		}
+		fromLite +=
+			"return cls(" + util::join(fliteArgs, ", ", [](auto a) {
+					return "flite." + a;
+				}) + ")";
 	}
 	return ctx;
 }
@@ -909,9 +955,12 @@ int main(int argc, char **argv) {
 
 		if(genPython) {
 			ctx.genTables();
-			cout << "from lite import StoreType" << endl
+
+			ofstream schema("./schema.py");
+			schema << "from lite import StoreType" << endl
 				<< "import util" << endl
 				<< endl;
+			/*
 			for(auto &table : ctx.tables) {
 				cout << pluralize(toCamelCase(table.name)) << "Table = '''" << endl
 					<< table.format() << endl
@@ -923,14 +972,16 @@ int main(int argc, char **argv) {
 					<< pluralize(toCamelCase(table.name)) << "Table)," << endl;
 			}
 			cout << "]" << endl;
+			*/
 
 			// hasKeys are special...
+			/*
 			map<string, int> prefixUsages{};
 			for(auto &table : ctx.tables) {
 				if(!table.hasKey) {
-					cout << "# noKey: " << pluralize(tableCase(table.name))
+					schema << "# noKey: " << pluralize(tableCase(table.name))
 						<< " : " << table.name << endl;
-					cout << "class " << toCamelCase("_" + table.name) << "(StoreType):" << endl
+					schema << "class " << toCamelCase("_" + table.name) << "(StoreType):" << endl
 						<< "\tpass" << endl
 						<< endl;
 					continue;
@@ -951,11 +1002,25 @@ int main(int argc, char **argv) {
 					<< endl
 					<< endl;
 			}
+			*/
+			for(auto &table : ctx.tables) {
+				cout << "class " << toCamelCase("_" + table.name)
+					<< "(StoreType):" << endl
+					<< "\tpass" << endl
+					<< endl;
+				schema << "class " << toCamelCase("_" + table.name)
+					<< "(StoreType):" << endl
+					<< "\tpass" << endl
+					<< endl;
+			}
 
 			cout << endl
 				<< "# =========================================" << endl;
 			auto pctx = ctx.genPythonContext();
 			cout << pctx.toString() << endl;
+			ofstream store("./store.py");
+			store << "import schema" << endl
+				<< pctx.toString() << endl;
 		}
 	} catch(string &ex) {
 		cerr << ex << endl;
