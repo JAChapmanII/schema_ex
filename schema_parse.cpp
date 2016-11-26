@@ -4,87 +4,11 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <cctype>
 using namespace std;
 
 #include <oil/util.hpp>
-
-bool isupper(char c) {
-	return (c >= 'A' && c <= 'Z');
-}
-char tolower(char c) {
-	if(isupper(c))
-		return c - 'A' + 'a';
-	return c;
-}
-string tableCase(string name) {
-	string tCase = "";
-	tCase += tolower(name[0]);
-	for(int i = 1; i < name.size(); ++i) {
-		if(isupper(name[i]) && (tCase.empty() || tCase.back() != '_'))
-			tCase += "_";
-		tCase += tolower(name[i]);
-	}
-	return tCase;
-}
-string pluralize(string name) {
-	if(name.length() >= 2 && name.substr(name.size() - 2) == "ss")
-		return name + "es";
-	else if(name.length() >= 1 && name.substr(name.size() - 1) == "s")
-		return name;
-	return name + "s";
-}
-string typedField(string type, string name) {
-	if(type == "int" || type == "bool") {
-		return "`" + name + "` INT NOT NULL";
-	}
-	if(type == "string") {
-		return "`" + name + "` TEXT NOT NULL";
-	}
-	throw "unknown field type: " + type;
-}
-string foreignKeyField(string name, string fprefix = "") {
-	string fname = (fprefix.empty() ? name : fprefix + "_" + name);
-	return "`" + tableCase(fname) + "_id` UNIQUEIDENTIFIER NOT NULL";
-}
-string foreignKeyConstraint(string name, string fprefix = "") {
-	string fname = (fprefix.empty() ? name : fprefix + "_" + name);
-	string ourField = tableCase(fname) + "_id",
-			idField = tableCase(name) + "_id",
-			tableName = pluralize(tableCase(name));
-	return "FOREIGN KEY(" + ourField + ") REFERENCES "
-		+ tableName + "(" + idField + ")";
-}
-string createTableHeader(string name) {
-	return "CREATE TABLE `" + pluralize(tableCase(name)) + "` (";
-}
-string createTableFooter() {
-	return ");";
-}
-string primaryKeyConstraint(vector<string> tables) {
-	string res = tableCase(tables.front()) + "_id";
-	for(int i = 1; i < tables.size(); ++i)
-		res += ", " + tableCase(tables[i]) + "_id";
-	return "PRIMARY KEY(" + res + ")";
-}
-template<typename... Args> string primaryKeyConstraint(Args... args) {
-	vector<string> vals = {args...};
-	return primaryKeyConstraint(vals);
-}
-string formatTable(string header, vector<string> fields,
-		vector<string> constraints, string footer) {
-	vector<string> parts = fields;
-	parts.insert(parts.end(), constraints.begin(), constraints.end());
-
-	string res = header + "\n";
-	for(int i = 0; i < parts.size(); ++i) {
-		res += "\t" + parts[i];
-		if(i != parts.size() - 1)
-			res += ",";
-		res += "\n";
-	}
-	res += footer;
-	return res;
-}
+#include <oil/err.hpp>
 
 bool isIdType(string type) {
 	return type.size() >= 6 && type.substr(type.size() - 6) == "::id_t";
@@ -107,7 +31,126 @@ string toCamelCase(string str) {
 	}
 	return res;
 }
+string toSnakeCase(string name) {
+	string tCase(1, tolower(name[0]));
+	for(int i = 1; i < name.size(); ++i) {
+		if(isupper(name[i]) && tCase.back() != '_')
+			tCase += "_";
+		tCase += tolower(name[i]);
+	}
+	return tCase;
+}
+string combineTypes(string btype, string field) {
+	field[0] = toupper(field[0]);
+	return btype + field;
+}
 
+string toIdColumn(string name) {
+	string ccase = toCamelCase(name);
+	if(util::endsWith(ccase, "Id"))
+		return ccase;
+	return ccase + "Id";
+}
+
+string pluralize(string name) {
+	if(name.length() >= 2 && name.substr(name.size() - 2) == "ss")
+		return name + "es";
+	else if(name.length() >= 1 && name.substr(name.size() - 1) == "s")
+		return name;
+	return name + "s";
+}
+string singularize(string name) {
+	if(util::endsWith(name, "sses"))
+		return name.substr(0, name.size() - 2);
+	if(util::endsWith(name, "ies") || util::endsWith(name, "us"))
+		return name;
+	if(util::endsWith(name, "s"))
+		return name.substr(0, name.size() - 1);
+	return name;
+}
+
+namespace sql {
+	enum class Type { Int, Bool, String, Id, TableId };
+	Type parse(string t) {
+		if(t == "int") return Type::Int;
+		if(t == "bool") return Type::Bool;
+		if(t == "string") return Type::String;
+		if(t == "id") return Type::TableId;
+		if(isIdType(t)) return Type::Id;
+		throw make_except("unknown field type: '" + t + "'");
+	}
+	string toString(Type type) {
+		switch(type) {
+			case Type::Int: return "INT";
+			case Type::Bool: return "INT";
+			case Type::String: return "TEXT";
+			case Type::Id: return "UNIQUEIDENTIFIER";
+			case Type::TableId: return "UNIQUEIDENTIFIER";
+		}
+		throw make_except("unkown type: " + to_string((int)type));
+	}
+	struct Column {
+		string name{};
+		Type type{};
+		bool nullable{false};
+		bool primaryKey{false};
+
+		bool foreignKey{false};
+		string foreignTable{""};
+
+		Column(string iname, string itype, bool pk = false)
+				: name{iname}, type{parse(itype)}, primaryKey{pk} {
+			if(type == Type::Id) {
+				name = toIdColumn(iname);
+				foreignKey = true;
+				foreignTable = getBaseIdType(itype);
+			}
+		}
+		void makeFK(string references) {
+			foreignKey = true;
+			foreignTable = references;
+		}
+		string toString() {
+			return "`" + name + "` " + sql::toString(type)
+				+ (nullable ? "" : " NOT NULL");
+		}
+		string buildFKConstraint() {
+			return "FOREIGN KEY(" + name + ") REFERENCES "
+				+ foreignTable + "(" + toIdColumn(foreignTable) + ")";
+		}
+	};
+	struct Table {
+		string typeName; // UpperCamelSingular
+		string name; // UpperCamelPlurals
+		vector<Column> columns{};
+		bool hasKey{true};
+
+		Table(string type, bool ihasKey = true)
+				: typeName{type}, name{pluralize(type)}, hasKey{ihasKey} {
+			if(hasKey)
+				columns.emplace_back(toIdColumn(type), "id", true);
+			cerr << "made table " << name << endl;
+		}
+
+		string toString() {
+			vector<string> pkColumns;
+			string columnDefs = "", constraintDefs = "";
+			for(auto &column : columns) {
+				columnDefs += "\t" + column.toString() + ",\n";
+				if(column.foreignKey)
+					constraintDefs += "\t" + column.buildFKConstraint() + ",\n";
+				if(column.primaryKey)
+					pkColumns.push_back(column.name);
+			}
+			return "CREATE TABLE `" + name + "` (\n"
+				+ columnDefs + constraintDefs
+				+ "\tPRIMARY KEY(" + util::join(pkColumns, ", ") + ")\n"
+				+ ");";
+		}
+	};
+};
+
+struct Context;
 
 struct Field {
 	bool composite{false};
@@ -118,8 +161,6 @@ struct Field {
 	Field(string itype, string iname)
 		: type{itype}, name{iname} { }
 };
-
-struct Context;
 
 struct Type {
 	string name{"{null}"};
@@ -134,22 +175,6 @@ struct Type {
 	Type() { }
 
 	string toString(Context *context);
-	string toPythonInfo(Context *context);
-};
-
-struct Table {
-	string name;
-	vector<string> fields;
-	vector<string> constraints;
-	bool hasKey{true};
-
-	Table(string iname, vector<string> ifields, vector<string> iconstraints)
-		: name{iname}, fields{ifields}, constraints{iconstraints} { }
-
-	string format() {
-		return formatTable(createTableHeader(name), fields, constraints,
-				createTableFooter());
-	}
 };
 
 namespace py {
@@ -258,7 +283,6 @@ namespace py {
 				});
 		}
 	};
-	// TODO: explicit context?
 }
 
 struct Context {
@@ -267,12 +291,13 @@ struct Context {
 	size_t idx{0};
 	map<string, string> parentTypes{};
 	map<string, int> typeDepth{};
+	// TODO: need to account for ::id_t usage as weak dependency
 	map<string, set<string>> weakDeps{};
 	map<string, int> weakDepOrder{};
 	map<string, string> pureChildFieldNames{};
 	map<string, string> setChildFieldNames{};
 	bool usedTranslatable{false};
-	vector<Table> tables{};
+	vector<sql::Table> tables{};
 
 	Context(string isrc) : src{isrc} {
 		types.emplace("int", Type{"int", false});
@@ -554,8 +579,6 @@ string Type::toString(Context *context) {
 		str += ", " + context->types[typeArguments[i]].toString(context);
 	return str + ">";
 }
-string Type::toPythonInfo(Context *context) {
-}
 
 void Context::genTables() {
 	auto orderedNonIdTypes = getOrderedNonIdTypes();
@@ -566,31 +589,14 @@ void Context::genTables() {
 		if(!type.composite || type.pureChild)
 			continue;
 
-		vector<string> tableFields{};
-		vector<string> tableConstraints{};
+		// our default key is added in constructor
+		tables.emplace_back(typeName, true);
+		auto &table = tables.back();
 
-		// handle id/parent ids
-		if(!util::contains(parentTypes, typeName)) {
-			// we're a root type, include our id primary key
-			tableFields.push_back("`" + tableCase(typeName) + "_id`"
-					+ " UNIQUEIDENTIFIER PRIMARY KEY");
-		} else {
-			// we're a child type, need to build id refs
-			string t = typeName;
-			vector<string> pkFields;
-			pkFields.push_back(t);
-
-			tableFields.push_back(foreignKeyField(t));
-			do {
-				t = parentTypes[t];
-				pkFields.push_back(t);
-
-				tableFields.push_back(foreignKeyField(t));
-				tableConstraints.push_back(foreignKeyConstraint(t));
-			} while(util::contains(parentTypes, t));
-
-			tableConstraints.push_back(primaryKeyConstraint(pkFields));
-		}
+		auto chain = getParentTypeChain(typeName);
+		// handle parent ids
+		for(size_t i = chain.size() - 1; i > 0; --i)
+			table.columns.emplace_back(chain[i], chain[i] + "::id_t", true);
 
 		for(int i = 0; i < type.fields.size(); ++i) {
 			auto &field = type.fields[i];
@@ -603,23 +609,9 @@ void Context::genTables() {
 			if(ft.name == "map" || ft.name == "set" || ft.name == "vector")
 				continue; // special subtable types are handled later
 
-			// if we have the id_t of another table, add foreign key
-			if(isIdType(field.type)) {
-				string otype = getBaseIdType(field.type);
-				tableFields.push_back("`" + tableCase(field.name) + "_id`"
-						+ " UNIQUEIDENTIFIER NOT NULL");
-				tableConstraints.push_back("FOREIGN KEY("
-						+ tableCase(field.name) + "_id) REFERENCES "
-						+ pluralize(tableCase(otype)) + "("
-						+ tableCase(otype) + "_id)");
-				continue;
-			}
-
-			tableFields.push_back(typedField(
-						field.type, tableCase(field.name)));
+			// if this is an id type, ctor knows and adds fk
+			table.columns.emplace_back(field.name, field.type, false);
 		}
-
-		tables.push_back(Table{typeName, tableFields, tableConstraints});
 	}
 
 	// in depth order, print child relations that aren't pure
@@ -634,43 +626,29 @@ void Context::genTables() {
 				continue; // sets are actual tables generated above
 			if(ft.name != "map" && ft.name != "vector")
 				continue; // impure child relations are only map and vector
+			if(ft.name == "map" && types[ft.typeArguments[1]].composite)
+				continue; // secretly a pure child
 
-			string pkSecond;
-			vector<string> fields, constraints;
-			fields.push_back(foreignKeyField(typeName));
-			constraints.push_back(foreignKeyConstraint(typeName));
+			// we still have our own primary key type but don't auto-gen it
+			tables.emplace_back(combineTypes(typeName, field.name), false);
+			auto &table = tables.back();
+
+			table.columns.emplace_back(typeName, typeName + "::id_t", true);
 
 			if(ft.name == "map") {
-				string keyType = ft.typeArguments[0], valType = ft.typeArguments[1];
-				auto &kt = types[keyType];
-				auto &vt = types[valType];
-				if(vt.composite) {
-					// this is actually a pure child, will be handled later
-					continue;
-				}
+				string keyType = ft.typeArguments[0],
+					valType = ft.typeArguments[1];
 
-				string keyTypeType = keyType.substr(0, keyType.size() - 6);
-
-				fields.push_back(foreignKeyField(keyTypeType, field.name));
-				fields.push_back(typedField(valType, "val"));
-
-				constraints.push_back(foreignKeyConstraint(
-							keyTypeType, field.name));
-				pkSecond = field.name + "_" + keyTypeType;
+				table.columns.emplace_back(
+						combineTypes(field.name, getBaseIdType(keyType)),
+						keyType, true);
+				table.columns.emplace_back("val", valType);
 			}
 			if(ft.name == "vector") {
+				cerr << ft.typeArguments.size() << endl;
 				string subType = ft.typeArguments[0];
-
-				fields.push_back(foreignKeyField(subType));
-				constraints.push_back(foreignKeyConstraint(subType));
-				pkSecond = subType;
+				table.columns.emplace_back(subType, subType + "::id_t", true);
 			}
-
-			constraints.push_back(primaryKeyConstraint(typeName, pkSecond));
-
-			tables.push_back(
-					Table{typeName + "_" + field.name, fields, constraints});
-			tables.back().hasKey = false;
 		}
 	}
 
@@ -682,6 +660,9 @@ void Context::genTables() {
 
 		string parentType = parentTypes[typeName];
 		cerr << "-- pure child " << typeName << " of " << parentType << endl;
+		// pure child relations have no key of their own
+		tables.emplace_back(typeName, false);
+		auto &table = tables.back();
 
 		string parentFieldName = pureChildFieldNames[typeName];
 		Field parentField{"{null}", parentFieldName};
@@ -698,67 +679,28 @@ void Context::genTables() {
 
 		vector<string> fields, constraints;
 
-		fields.push_back(foreignKeyField(parentType));
-		constraints.push_back(foreignKeyConstraint(parentType));
-
-		string parentFieldKeyTypeType = getBaseIdType(parentFieldKeyType);
-		fields.push_back(foreignKeyField(parentFieldKeyTypeType));
-		constraints.push_back(foreignKeyConstraint(parentFieldKeyTypeType));
-
-		constraints.push_back(primaryKeyConstraint(
-					parentType, parentFieldKeyTypeType));
+		table.columns.emplace_back(parentType, parentType + "::id_t", true);
+		table.columns.emplace_back(getBaseIdType(parentFieldKeyType),
+				parentFieldKeyType, true);
 
 		for(auto &field : type.fields) {
 			auto &ft = types[field.type];
 			// should only have built in fields and ::id_t
 
-			if(isIdType(ft.name)) {
-				string ftType = getBaseIdType(ft.name);
-				if(ftType == typeName)
-					continue; // don't print key type for self
-				fields.push_back(foreignKeyField(ftType));
-				constraints.push_back(foreignKeyConstraint(ftType));
-				continue;
-			}
-			fields.push_back(typedField(ft.name, field.name));
+			if(isIdType(ft.name) && ft.name == typeName + "::id_t")
+				continue; // don't print key type for self
+			table.columns.emplace_back(field.name, field.type);
 		}
-
-		tables.push_back(Table{typeName, fields, constraints});
-		tables.back().hasKey = false;
 	}
 }
 
 vector<string> Context::genPythonTypes() {
 }
 py::Context Context::genPythonContext() {
+	py::Context ctx{};
+	/*
 	auto orderedNonIdTypes = getOrderedNonIdTypes();
 
-	// in depth order, print create tables for struct types
-	for(auto &typeName : orderedNonIdTypes) {
-		auto &type = types[typeName];
-		if(!type.composite || type.pureChild)
-			continue;
-
-		// do stuff
-	}
-
-	// impure children
-	for(auto &typeName : orderedNonIdTypes) {
-		auto &type = types[typeName];
-		if(!type.composite || type.pureChild)
-			continue;
-	}
-
-	// pure children
-	for(auto &typeName : orderedNonIdTypes) {
-		auto &type = types[typeName];
-		if(!type.composite || !type.pureChild)
-			continue;
-		// do stuff
-	}
-
-	string defaultConstructor = "\tdef __init__(self):\n";
-	py::Context ctx{};
 	for(auto &typeName : orderedNonIdTypes) {
 		auto &type = types[typeName];
 		if(!type.composite) continue;
@@ -925,6 +867,7 @@ py::Context Context::genPythonContext() {
 					return "flite." + a;
 				}) + ")";
 	}
+	*/
 	return ctx;
 }
 
@@ -947,10 +890,8 @@ int main(int argc, char **argv) {
 		Context ctx{text};
 		if(genSchema) {
 			cout << "-- schema generated from " << argv[1] << endl;
-			for(auto &table : ctx.tables) {
-				cout << "-- table " << table.name << endl;
-				cout << table.format() << endl;
-			}
+			for(auto &table : ctx.tables)
+				cout << table.toString() << endl;
 		}
 
 		if(genPython) {
