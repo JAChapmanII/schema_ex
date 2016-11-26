@@ -1,14 +1,14 @@
 [[translatable]] struct DamageClass { };
 
 [[translatable]] struct Stat {
-	DamageClass::id_t damageClass;
+	DamageClass::id_t damageClassId;
 
 	bool isBattleOnly;
 	int gameIndex;
 };
 
 [[translatable]] struct Type {
-	DamageClass::id_t damageClass;
+	DamageClass::id_t damageClassId;
 
 	map<Type::id_t, int> damageFactors;
 };
@@ -16,7 +16,7 @@
 [[translatable]] struct State { };
 
 struct MoveEffect {
-	Stat::id_t which;
+	Stat::id_t statId;
 	int stageChange;
 	int chance;
 	int target;
@@ -24,21 +24,21 @@ struct MoveEffect {
 };
 
 struct MoveState {
-	State::id_t which;
+	State::id_t stateId;
 	int chance;
 	int target;
 	int when;
 };
 
 [[translatable]] struct Move {
-	Type::id_t type; // TODO: allow multiple?
+	Type::id_t typeId; // TODO: allow multiple?
 
 	int power;
 	int pp;
 	int accuracy;
 	int priority;
 	int target;
-	DamageClass::id_t damageClass;
+	DamageClass::id_t damageClassId;
 
 	set<MoveState> states;
 	set<MoveEffect> effects;
@@ -65,14 +65,14 @@ struct Species {
 [[translatable]] struct ExperienceGroup { };
 
 [[translatable]] struct Titan {
-	Species::id_t species;
+	Species::id_t speciesId;
 
 	int baseExperience;
 	int order;
 	bool isDefault;
 
 	map<Attribute::id_t, string> attributes;
-	ExperienceGroup::id_t experienceGroup;
+	ExperienceGroup::id_t experienceGroupId;
 
 	vector<Type> types;
 	map<Stat::id_t, TitanStat> stats;
