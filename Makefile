@@ -4,7 +4,7 @@ SRC=src
 BIN=bin
 
 OBJS=
-#OBJS+=${OBJ}/
+OBJS+=${OBJ}/parser.o ${OBJ}/sql.o ${OBJ}/py.o
 
 CXXFLAGS+=-std=c++17 -Wall -Wextra
 LDFLAGS=-loil -lsqlite3 -lpq -lcurl
@@ -23,7 +23,7 @@ dirs:
 
 # src targets
 ${BIN}/%: ${SRC}/%.cpp ${OBJS}
-	${CXX} ${CXXFLAGS} -o $@ $< ${LDFLAGS}
+	${CXX} ${CXXFLAGS} -o $@ $^ ${LDFLAGS}
 
 ${OBJ}/%.o: ${SRC}/%.cpp ${SRC}/%.hpp
 	${CXX} ${CXXFLAGS} -o $@ -c $<
