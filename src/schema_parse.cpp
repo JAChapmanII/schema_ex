@@ -18,11 +18,12 @@ string getBaseIdType(string type) {
 }
 
 string toCamelCase(string str) {
+	if(str.empty()) return "";
 	string res = "";
-	int start = 0;
+	size_t start = 0;
 	if(str.front() != '_')
 		res += tolower(str.front()), start = 1;
-	for(int i = start; i < str.size(); ++i) {
+	for(size_t i = start; i < str.size(); ++i) {
 		if(str[i] == '_' && i < str.size() - 1) {
 			res += toupper(str[i + 1]);
 			++i;
@@ -32,8 +33,9 @@ string toCamelCase(string str) {
 	return res;
 }
 string toSnakeCase(string name) {
+	if(name.empty()) return "";
 	string tCase(1, tolower(name[0]));
-	for(int i = 1; i < name.size(); ++i) {
+	for(size_t i = 1; i < name.size(); ++i) {
 		if(isupper(name[i]) && tCase.back() != '_')
 			tCase += "_";
 		tCase += tolower(name[i]);
@@ -556,7 +558,6 @@ struct Context {
 	}
 
 	void genTables();
-	vector<string> genPythonTypes();
 	py::Context genPythonContext();
 
 	vector<string> getParentTypeChain(string type) {
@@ -575,7 +576,7 @@ string Type::toString(Context *context) {
 	if(typeArguments.empty())
 		return name;
 	string str = name + "<" + context->types[typeArguments[0]].toString(context);
-	for(int i = 1; i < typeArguments.size(); ++i)
+	for(size_t i = 1; i < typeArguments.size(); ++i)
 		str += ", " + context->types[typeArguments[i]].toString(context);
 	return str + ">";
 }
@@ -598,7 +599,7 @@ void Context::genTables() {
 		for(size_t i = chain.size() - 1; i > 0; --i)
 			table.columns.emplace_back(chain[i], chain[i] + "::id_t", true);
 
-		for(int i = 0; i < type.fields.size(); ++i) {
+		for(size_t i = 0; i < type.fields.size(); ++i) {
 			auto &field = type.fields[i];
 			auto &ft = types[field.type];
 			if(ft.composite)
@@ -694,8 +695,6 @@ void Context::genTables() {
 	}
 }
 
-vector<string> Context::genPythonTypes() {
-}
 py::Context Context::genPythonContext() {
 	py::Context ctx{};
 	/*
@@ -856,19 +855,32 @@ py::Context Context::genPythonContext() {
 			if(isIdType(field.name)) {
 				fliteArgs.push_back("None TODO");
 			} else {
-				fliteArgs.push_back(tableCase(field.name));
+				fliteArgs.push_back(field.name);
 			}
 		}
 		if(!type.pureChild) {
-			fliteArgs.push_back(tableCase(type.name) + "_id");
+			fliteArgs.push_back(toIdColumn(type.name));
 		}
 		fromLite +=
 			"return cls(" + util::join(fliteArgs, ", ", [](auto a) {
 					return "flite." + a;
 				}) + ")";
 	}
-	*/
 	return ctx;
+}
+
+void printSchemaInfoAsPython(Context &ctx, ostream &out) {
+	for(auto &table : ctx.tables) {
+		out << toCamelCase(table.name) << "Table = '''" << endl
+			<< table.toString() << endl
+			<< "'''" << endl;
+	}
+	out << endl << "tables = [" << endl;
+	for(auto &table : ctx.tables) {
+		out << "\t('" << table.name << "', "
+			<< pluralize(toCamelCase(table.name)) << "Table)," << endl;
+	}
+	out << "]" << endl;
 }
 
 int main(int argc, char **argv) {
@@ -901,56 +913,14 @@ int main(int argc, char **argv) {
 			schema << "from lite import StoreType" << endl
 				<< "import util" << endl
 				<< endl;
-			/*
-			for(auto &table : ctx.tables) {
-				cout << pluralize(toCamelCase(table.name)) << "Table = '''" << endl
-					<< table.format() << endl
-					<< "'''" << endl;
-			}
-			cout << endl << "tables = [" << endl;
-			for(auto &table : ctx.tables) {
-				cout << "\t('" << pluralize(tableCase(table.name)) << "', "
-					<< pluralize(toCamelCase(table.name)) << "Table)," << endl;
-			}
-			cout << "]" << endl;
-			*/
 
-			// hasKeys are special...
-			/*
-			map<string, int> prefixUsages{};
+			//printSchemaInfoAsPython(ctx, cout);
+
 			for(auto &table : ctx.tables) {
-				if(!table.hasKey) {
-					schema << "# noKey: " << pluralize(tableCase(table.name))
-						<< " : " << table.name << endl;
-					schema << "class " << toCamelCase("_" + table.name) << "(StoreType):" << endl
-						<< "\tpass" << endl
-						<< endl;
-					continue;
-				}
-
-				continue; // has keys handled down below in python ctx?
-				string prefix = string{tolower(table.name.front())};
-				int cnt = prefixUsages[prefix]++;
-				prefix += string{(char)('0' + cnt)};
-
-				cout << "# hasKey: " << pluralize(tableCase(table.name))
-					<< " : " << table.name
-					<< " : " << prefix << endl;
 				cout << "class " << table.name << "(StoreType):" << endl
-					<< "\tdef __init__(self):" << endl
-					<< "\t\tself." << tableCase(table.name) << "_id "
-					<< "= '" << prefix << "' + util.randomString(6)" << endl
-					<< endl
-					<< endl;
-			}
-			*/
-			for(auto &table : ctx.tables) {
-				cout << "class " << toCamelCase("_" + table.name)
-					<< "(StoreType):" << endl
 					<< "\tpass" << endl
 					<< endl;
-				schema << "class " << toCamelCase("_" + table.name)
-					<< "(StoreType):" << endl
+				schema << "class " << table.name << "(StoreType):" << endl
 					<< "\tpass" << endl
 					<< endl;
 			}
@@ -958,9 +928,10 @@ int main(int argc, char **argv) {
 			cout << endl
 				<< "# =========================================" << endl;
 			auto pctx = ctx.genPythonContext();
-			cout << pctx.toString() << endl;
+			cout << pctx.toString() << endl << endl;
 			ofstream store("./store.py");
 			store << "import schema" << endl
+				<< "import util" << endl
 				<< pctx.toString() << endl;
 		}
 	} catch(string &ex) {
