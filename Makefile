@@ -19,10 +19,10 @@ release: CXXFLAGS+=-O2
 release: dirs ${BINS}
 
 dirs:
-	mkdir -p ${OBJ} ${LIB} ${BIN}
+	mkdir -p ${OBJ} ${BIN}
 
 # src targets
-${BIN}/%: ${SRC}/%.o ${OBJS}
+${BIN}/%: ${SRC}/%.cpp ${OBJS}
 	${CXX} ${CXXFLAGS} -o $@ $< ${LDFLAGS}
 
 ${OBJ}/%.o: ${SRC}/%.cpp ${SRC}/%.hpp
