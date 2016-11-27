@@ -697,7 +697,6 @@ void Context::genTables() {
 
 py::Context Context::genPythonContext() {
 	py::Context ctx{};
-	/*
 	auto orderedNonIdTypes = getOrderedNonIdTypes();
 
 	for(auto &typeName : orderedNonIdTypes) {
@@ -712,18 +711,14 @@ py::Context Context::genPythonContext() {
 
 		auto &pclass = ctx[type.name];
 		auto &ctor = pclass["__init__"];
-		Type *parentType{nullptr};
 		Field *parentField{nullptr};
 		Type *parentFieldType{nullptr};
 
 		if(!parents.empty()) {
 			for(auto &parent : parents) {
-				ctor.arguments.push_back(toCamelCase(parent) + "ID");
-				ctor +=
-					"self." + toCamelCase(parent) + "ID"
-					+ " = " + toCamelCase(parent) + "ID";
+				ctor.arguments.push_back(toIdColumn(parent));
+				ctor += "self." + toIdColumn(parent) + " = " + toIdColumn(parent);
 			}
-			parentType = &types[parents.back()];
 		}
 		if(type.pureChild) {
 			ctor += "# pure child";
@@ -737,16 +732,17 @@ py::Context Context::genPythonContext() {
 
 			auto ktype = getBaseIdType(parentFieldType->typeArguments[0]);
 
-			ctor.arguments.emplace_back(toCamelCase(ktype) + "ID");
-			ctor += "self." + toCamelCase(ktype) + "ID = "
-				+ toCamelCase(ktype) + "ID";
+			ctor.arguments.emplace_back(toCamelCase(ktype) + "Id");
+			ctor += "self." + toCamelCase(ktype) + "Id = "
+				+ toCamelCase(ktype) + "Id";
 		} else {
 			ctor +=
-				"self." + toCamelCase(type.name) + "ID = util.randomString(6)"
-					+ " if " + toCamelCase(type.name) + "ID is None else "
-					+ toCamelCase(type.name) + "ID";
+				"self." + toCamelCase(type.name) + "Id = util.randomString(6)"
+					+ " if " + toCamelCase(type.name) + "Id is None else "
+					+ toCamelCase(type.name) + "Id";
 		}
 
+		bool hasSimpleFields = false;
 		auto &loadAll = pclass["loadAll"];
 		for(auto &field : type.fields) {
 			if(field.name == "id") continue; // skip self id
@@ -757,21 +753,53 @@ py::Context Context::genPythonContext() {
 				auto &loadMember = pclass[toCamelCase("load_" + field.name)];
 				loadAll += "self." + loadMember.name + "()";
 				if(!stype.composite) {
-					loadMember += "tmp = schema."
-						+ toCamelCase("_" + type.name + "_" + field.name)
+					auto backingType = toCamelCase(
+							"_" + type.name + "_" + field.name);
+					auto backingTypeId = toCamelCase(
+							field.name + "_" + toIdColumn(btype));
+					loadMember += "tmp = schema." + backingType
 						+ ".select({"
-						+ "'" + tableCase(type.name) + "_id': "
-						+ "self." + toCamelCase(type.name)
+						+ "'" + toIdColumn(type.name) + "': "
+							+ "self." + toIdColumn(type.name)
 						+ "})";
 					loadMember += "self." + field.name + " = "
-						+ "{ t." + tableCase(btype) + "_id: t.val for t in tmp }";
+						+ "{ t." + backingTypeId + ": t.val for t in tmp }";
+
+					auto &setMember = pclass[toCamelCase(
+							"set_" + singularize(field.name))];
+					string oKey = toCamelCase(field.name + "_" + btype) + "Id",
+							schemaType = "schema."
+								+ toCamelCase("_" + type.name + "_" + field.name);
+					setMember.arguments.push_back({oKey});
+					setMember.arguments.push_back({"val"});
+					setMember += "self." + field.name + "[" + oKey + "] = val";
+					setMember += "tmp = " + schemaType
+						+ ".fromDict({"
+						+ "'" + toCamelCase(type.name) + "Id': self."
+						+ toCamelCase(type.name) + "Id, "
+						+ "'" + oKey + "': " + oKey + ", "
+						+ "'val': val"
+						+ "})";
+					setMember += "tmp.upsert()";
+
+					auto &delMember = pclass[toCamelCase(
+							"del_" + singularize(field.name))];
+					delMember.arguments.push_back({oKey});
+					delMember += "self." + field.name + ".pop(" + oKey + ", None)";
+					delMember += schemaType + ".delSingle((self."
+						+ toCamelCase(type.name) + "Id, " + oKey + ",))";
 				} else {
 					loadMember += "tmp = " + stype.name + ".findAll("
 						+ util::join(pks, ", ", [](auto p) {
-								return toCamelCase(p) + "ID";
+								return toCamelCase(p) + "Id";
 							}) + ")";
 					loadMember += "self." + field.name + " = "
-						+ "{ t." + toCamelCase(btype) + "ID: t for t in tmp }";
+						+ "{ t." + toCamelCase(btype) + "Id: t for t in tmp }";
+
+					auto &addMember = pclass[toCamelCase(
+							"add_" + singularize(field.name))];
+					addMember += "# TODO";
+					addMember += "pass";
 				}
 				ctor += "self." + field.name + " = {} # " + field.type;
 				continue;
@@ -780,16 +808,39 @@ py::Context Context::genPythonContext() {
 				auto btype = ftype.typeArguments[0];
 				auto &loadMember = pclass[toCamelCase("load_" + field.name)];
 				loadAll += "self." + loadMember.name + "()";
-				loadMember += "tmp = schema."
-					+ toCamelCase("_" + type.name + "_" + field.name)
+				loadMember += "# vector";
+				auto schemaType = "schema."
+					+ toCamelCase("_" + type.name + "_" + field.name);
+				loadMember += "tmp = " + schemaType
 					+ ".select({"
-					+ "'" + tableCase(type.name) + "_id': "
-					+ "self." + toCamelCase(type.name)
+					+ "'" + toIdColumn(type.name) + "': " + toIdColumn(type.name)
 					+ "})";
 				loadMember += "self." + field.name + " = "
-					+ "[t." + tableCase(btype) + "_id for t in tmp]";
+					+ "[t." + toIdColumn(btype) + " for t in tmp]";
 
 				ctor += "self." + field.name + " = [] # " + field.type;
+
+				auto &addMember = pclass[toCamelCase(
+						"add_" + singularize(field.name))];
+				addMember += "# vector";
+				addMember.arguments.emplace_back(toIdColumn(btype));
+				//addMember += "self." + field.name + " += [" + toIdColumn(btype) + "]";
+				addMember += "tmp = " + schemaType + ".fromDict({"
+					+ "'" + toIdColumn(type.name) + "': " + toIdColumn(type.name)
+					+ ", '" + toIdColumn(btype) + "': " + toIdColumn(btype)
+					+ "})";
+				addMember += "tmp.upsert()";
+				addMember += "self." + loadMember.name + "()";
+
+				auto &delMember = pclass[toCamelCase(
+						"del_" + singularize(field.name))];
+				delMember += "# TODO vector";
+				delMember.arguments.emplace_back(toIdColumn(btype));
+				delMember += schemaType + ".delSingle(("
+					+ toIdColumn(type.name) + ", " + toIdColumn(btype)
+					+ ",))";
+				delMember += "self." + loadMember.name + "()";
+
 				continue;
 			}
 			if(ftype.name == "set") {
@@ -798,13 +849,19 @@ py::Context Context::genPythonContext() {
 				loadMember +=
 						"self." + field.name + " = " + ftype.typeArguments[0]
 						+ ".findAll("
-						+ util::join(pks, ", ", [](auto p) {
-							return toCamelCase(p) + "ID";
+					+ util::join(pks, ", ", [](auto p) {
+							return toCamelCase(p) + "Id";
 							}) + ")";
 
 				ctor += "self." + field.name + " = [] # " + field.type;
+
+				auto &addMember = pclass[toCamelCase(
+						"add_" + singularize(field.name))];
+				addMember += "# TODO";
+				addMember += "pass";
 				continue;
 			}
+			// TODO: helper this?
 			string val = "None";
 			if(field.type == "int") val = "0";
 			if(field.type == "bool") val = "False";
@@ -813,36 +870,53 @@ py::Context Context::genPythonContext() {
 			ctor.arguments.emplace_back(field.name, val, true);
 
 			ctor += "self." + field.name + " = " + field.name + " # " + field.type;
+			hasSimpleFields = true;
+		}
+
+		if(hasSimpleFields) {
+			auto &upsert = pclass["upsert"];
+			upsert += "tmp = schema." + pluralize(type.name) + ".fromObject(self)";
+			upsert += "tmp.upsert()";
+			/*
+			for(auto &field : type.fields) {
+				if(field.name == "id") continue; // skip self id
+				auto &ftype = types[field.type];
+				// TODO: helper this
+				if(type.name == "set" || ftype.name == "map"
+						|| ftype.name == "vector") {
+					continue;
+				}
+				*/
 		}
 
 		if(!type.pureChild)
-			ctor.arguments.push_back({toCamelCase(type.name) + "ID", "None", true});
+			ctor.arguments.push_back({toCamelCase(type.name) + "Id", "None", true});
 
 		auto &findAll = pclass["findAll"];
 		findAll.type = py::FunctionType::Class;
 		findAll.arguments.reserve(parents.size());
 		for(auto &parent : parents) {
-			string ident = toCamelCase(parent) + "ID";
+			string ident = toCamelCase(parent) + "Id";
 			findAll.arguments.push_back({ident, "None", true});
 		}
 
 		findAll.body.push_back(
 			"return [cls.fromLite(o) for o in schema."
-			+ type.name + ".select({"
+			+ pluralize(type.name) + ".select({"
 			+ util::join(parents, ", ", [](auto p) {
-					return "'" + tableCase(p) + "_id': " + toCamelCase(p) + "ID";
+					return "'" + toIdColumn(p) + "': " + toIdColumn(p);
 				})
-			+ "})");
+			+ "})]");
 
 		auto &fromLite = pclass["fromLite"];
 		fromLite.type = py::FunctionType::Class;
 		fromLite.arguments.push_back({"flite"});
 		vector<string> fliteArgs{};
 		for(auto &parent : parents)
-			fliteArgs.push_back(tableCase(parent) + "_id");
+			fliteArgs.push_back(toIdColumn(parent));
 		if(type.pureChild) {
 			auto ktype = getBaseIdType(parentFieldType->typeArguments[0]);
-			fliteArgs.push_back(tableCase(ktype) + "_id");
+			fliteArgs.push_back(toIdColumn(ktype));
 		}
 		for(auto &field : type.fields) {
 			if(field.name == "id") continue; // skip self id
